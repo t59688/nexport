@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="92" y1="72" x2="930" y2="956" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#182640" />
+      <stop offset=".56" stop-color="#0F1A2E" />
+      <stop offset="1" stop-color="#08111E" />
+    </linearGradient>
+    <radialGradient id="glowTop" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(264 182) rotate(52.4) scale(394.17 282.21)">
+      <stop stop-color="#4A638F" stop-opacity=".58" />
+      <stop offset=".52" stop-color="#304668" stop-opacity=".16" />
+      <stop offset="1" stop-color="#182640" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="glowBottom" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(734 816) rotate(-127.34) scale(430.52 310.61)">
+      <stop stop-color="#0E1B33" stop-opacity=".46" />
+      <stop offset=".6" stop-color="#0A1425" stop-opacity=".14" />
+      <stop offset="1" stop-color="#08111E" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="ring" x1="236" y1="256" x2="786" y2="782" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3D7EFF" />
+      <stop offset=".52" stop-color="#2CB7FF" />
+      <stop offset="1" stop-color="#27F0B4" />
+    </linearGradient>
+    <linearGradient id="lane" x1="350" y1="340" x2="672" y2="684" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7CEEF0" />
+      <stop offset=".54" stop-color="#42C6FB" />
+      <stop offset="1" stop-color="#2DE6C3" />
+    </linearGradient>
+    <linearGradient id="gate" x1="512" y1="334" x2="512" y2="690" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2047E1" />
+      <stop offset="1" stop-color="#2CE7C7" />
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="176" fill="url(#bg)" />
+  <rect width="1024" height="1024" rx="176" fill="url(#glowTop)" />
+  <rect width="1024" height="1024" rx="176" fill="url(#glowBottom)" />
+  <rect x="1" y="1" width="1022" height="1022" rx="175" stroke="white" stroke-opacity=".03" stroke-width="2" />
+
+  <g opacity=".24">
+    <path d="M512 202c171 0 310 139 310 310S683 822 512 822 202 683 202 512s139-310 310-310Z" stroke="#050D18" stroke-width="70" />
+    <path d="M360 364 648 652" stroke="#050D18" stroke-width="98" stroke-linecap="round" />
+    <path d="M512 348v328" stroke="#050D18" stroke-width="86" stroke-linecap="round" />
+  </g>
+
+  <circle cx="512" cy="512" r="276" stroke="url(#ring)" stroke-width="54" />
+  <path d="M334 512h82" stroke="#3E86FF" stroke-width="34" stroke-linecap="round" />
+  <path d="M608 512h82" stroke="#2EE8C0" stroke-width="34" stroke-linecap="round" />
+
+  <path d="M378 384 646 652" stroke="url(#lane)" stroke-width="90" stroke-linecap="round" />
+  <path d="M512 350v324" stroke="url(#gate)" stroke-width="78" stroke-linecap="round" />
+
+  <circle cx="512" cy="512" r="48" fill="#0A1422" />
+  <path d="M482 512h60" stroke="#D7FFFF" stroke-width="18" stroke-linecap="round" />
+  <path d="M512 482v60" stroke="#D7FFFF" stroke-width="18" stroke-linecap="round" opacity=".9" />
+
+  <path d="M334 512l38-38" stroke="#67D9FF" stroke-width="18" stroke-linecap="round" />
+  <path d="M334 512l38 38" stroke="#67D9FF" stroke-width="18" stroke-linecap="round" />
+  <path d="M690 512l-38-38" stroke="#5EF3CF" stroke-width="18" stroke-linecap="round" />
+  <path d="M690 512l-38 38" stroke="#5EF3CF" stroke-width="18" stroke-linecap="round" />
+
+  <path d="M386 372c30 2 52 14 72 37" stroke="#E8FFFF" stroke-opacity=".26" stroke-width="16" stroke-linecap="round" />
+  <path d="M612 620c15 18 31 29 50 33" stroke="#C8FFF5" stroke-opacity=".18" stroke-width="8" stroke-linecap="round" />
+</svg>
