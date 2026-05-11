@@ -140,7 +140,9 @@ async fn dismiss_update(
 
 #[tauri::command]
 fn open_release_page(url: String) -> Result<(), String> {
-    webbrowser::open(&url).map(|_| ()).map_err(|err| err.to_string())
+    webbrowser::open(&url)
+        .map(|_| ())
+        .map_err(|err| err.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

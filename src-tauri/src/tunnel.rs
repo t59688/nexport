@@ -25,6 +25,12 @@ use uuid::Uuid;
 const LOG_LIMIT: usize = 300;
 const RELEASES_API_URL: &str = "https://api.github.com/repos/t59688/nexport/releases/latest";
 const RELEASES_PAGE_URL: &str = "https://github.com/t59688/nexport/releases";
+const SSH_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(15);
+const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const SSH_KEEPALIVE_MAX: usize = 3;
+const SSH_HEALTHCHECK_INTERVAL: Duration = Duration::from_secs(5);
+const RECONNECT_DELAY_MIN: Duration = Duration::from_secs(2);
+const RECONNECT_DELAY_MAX: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -251,23 +257,25 @@ struct GithubLatestRelease {
 impl TunnelConfig {
     fn from_draft(draft: TunnelDraft) -> Result<Self> {
         if draft.name.trim().is_empty() {
-            return Err(anyhow!("规则名称不能为空"));
+            return Err(anyhow!("瑙勫垯鍚嶇О涓嶈兘涓虹┖"));
         }
         if draft.target_host.trim().is_empty()
             || draft.ssh_host.trim().is_empty()
             || draft.ssh_user.trim().is_empty()
         {
-            return Err(anyhow!("SSH 主机、SSH 用户和目标主机不能为空"));
+            return Err(anyhow!("SSH host, SSH user, and target host are required"));
         }
         if draft.auth_method == AuthMethod::Password
             && draft.password.as_deref().unwrap_or("").is_empty()
         {
-            return Err(anyhow!("密码认证需要填写 SSH 密码"));
+            return Err(anyhow!("Password authentication requires an SSH password"));
         }
         if draft.auth_method == AuthMethod::PrivateKey
             && draft.private_key_path.as_deref().unwrap_or("").is_empty()
         {
-            return Err(anyhow!("私钥认证需要填写私钥路径"));
+            return Err(anyhow!(
+                "Private key authentication requires a private key path"
+            ));
         }
 
         Ok(Self {
@@ -312,7 +320,7 @@ impl Default for RuntimeStatus {
     fn default() -> Self {
         Self {
             status: TunnelStatus::Stopped,
-            status_message: "等待启动".into(),
+            status_message: "Idle".into(),
             active_connections: 0,
             started_at: None,
             last_error: None,
@@ -357,7 +365,10 @@ pub struct TunnelManager {
 
 impl TunnelManager {
     pub fn bootstrap(app: AppHandle) -> Result<(Self, Vec<String>)> {
-        let base_dir = app.path().app_data_dir().context("无法定位应用数据目录")?;
+        let base_dir = app
+            .path()
+            .app_data_dir()
+            .context("鏃犳硶瀹氫綅搴旂敤鏁版嵁鐩綍")?;
         std::fs::create_dir_all(&base_dir)?;
 
         let store_path = base_dir.join("tunnels.json");
@@ -381,7 +392,12 @@ impl TunnelManager {
             .map(|item| item.id.clone())
             .collect::<Vec<_>>();
 
-        push_shared_log(&logs, LogLevel::Info, "system", "应用已启动，配置已加载。");
+        push_shared_log(
+            &logs,
+            LogLevel::Info,
+            "system",
+            "Application started and configuration loaded.",
+        );
 
         Ok((
             Self {
@@ -475,9 +491,9 @@ impl TunnelManager {
             let should_restart = state.runtimes.contains_key(&config.id);
             let id = config.id.clone();
             let message = if state.configs.contains_key(&config.id) {
-                format!("规则“{}”已更新。", config.name)
+                format!("Rule '{}' updated.", config.name)
             } else {
-                format!("规则“{}”已创建。", config.name)
+                format!("Rule '{}' created.", config.name)
             };
 
             state.configs.insert(config.id.clone(), config);
@@ -526,7 +542,7 @@ impl TunnelManager {
             .map_err(to_string)?;
 
         if let Some(name) = removed_name {
-            self.push_log(LogLevel::Info, "rule", &format!("规则“{}”已删除。", name));
+            self.push_log(LogLevel::Info, "rule", &format!("Rule '{}' deleted.", name));
         }
 
         self.snapshot().await
@@ -544,7 +560,7 @@ impl TunnelManager {
                     .configs
                     .get(id)
                     .cloned()
-                    .ok_or_else(|| "未找到对应隧道".to_owned())?,
+                    .ok_or_else(|| "Tunnel rule not found".to_owned())?,
                 state.trusted_hosts.clone(),
             )
         };
@@ -554,7 +570,7 @@ impl TunnelManager {
             id,
             RuntimeStatus {
                 status: TunnelStatus::Starting,
-                status_message: format!("正在绑定 {}", config.address()),
+                status_message: format!("Binding {}", config.address()),
                 active_connections: 0,
                 started_at: None,
                 last_error: None,
@@ -583,7 +599,7 @@ impl TunnelManager {
                 LogLevel::Warn,
                 "tunnel",
                 &format!(
-                    "规则“{}”启动前检查未通过：{}",
+                    "Rule '{}' failed preflight: {}",
                     config.name, preflight.message
                 ),
             );
@@ -619,7 +635,7 @@ impl TunnelManager {
         self.push_log(
             LogLevel::Info,
             "tunnel",
-            &format!("规则“{}”已进入启动流程。", config.name),
+            &format!("Rule '{}' entered startup flow.", config.name),
         );
 
         self.snapshot().await
@@ -636,7 +652,7 @@ impl TunnelManager {
                 id,
                 RuntimeStatus {
                     status: TunnelStatus::Stopping,
-                    status_message: "正在停止监听".into(),
+                    status_message: "Stopping listener".into(),
                     active_connections: 0,
                     started_at: None,
                     last_error: None,
@@ -651,7 +667,7 @@ impl TunnelManager {
                 self.push_log(
                     LogLevel::Info,
                     "tunnel",
-                    &format!("规则“{}”已停止。", config_name),
+                    &format!("Rule '{}' stopped.", config_name),
                 );
             }
         }
@@ -667,7 +683,7 @@ impl TunnelManager {
         for id in ids {
             let _ = self.start_tunnel(&id).await;
         }
-        self.push_log(LogLevel::Info, "batch", "已执行全部启动。");
+        self.push_log(LogLevel::Info, "batch", "Started all rules.");
         self.snapshot().await
     }
 
@@ -679,7 +695,7 @@ impl TunnelManager {
         for id in ids {
             let _ = self.stop_tunnel(&id).await;
         }
-        self.push_log(LogLevel::Info, "batch", "已执行全部停止。");
+        self.push_log(LogLevel::Info, "batch", "Stopped all rules.");
         self.snapshot().await
     }
 
@@ -695,13 +711,13 @@ impl TunnelManager {
         fs::write(persist_path, persist_payload)
             .await
             .map_err(to_string)?;
-        self.push_log(LogLevel::Info, "settings", "设置已更新。");
+        self.push_log(LogLevel::Info, "settings", "Settings updated.");
         self.snapshot().await
     }
 
     pub async fn clear_logs(&self) -> Result<AppSnapshot, String> {
         lock(&self.logs).clear();
-        self.push_log(LogLevel::Info, "log", "日志已清空。");
+        self.push_log(LogLevel::Info, "log", "Logs cleared.");
         self.snapshot().await
     }
 
@@ -719,7 +735,7 @@ impl TunnelManager {
                 _ => LogLevel::Warn,
             },
             "test",
-            &format!("测试“{}”：{}", config.name, result.message),
+            &format!("Tested rule '{}': {}", config.name, result.message),
         );
         Ok(result)
     }
@@ -749,7 +765,7 @@ impl TunnelManager {
         fs::write(persist_path, persist_payload)
             .await
             .map_err(to_string)?;
-        self.push_log(LogLevel::Info, "hostkey", "已写入信任主机指纹。");
+        self.push_log(LogLevel::Info, "hostkey", "Trusted host fingerprint saved.");
         self.snapshot().await
     }
 
@@ -766,7 +782,11 @@ impl TunnelManager {
         fs::write(persist_path, persist_payload)
             .await
             .map_err(to_string)?;
-        self.push_log(LogLevel::Info, "hostkey", "已移除主机指纹信任。");
+        self.push_log(
+            LogLevel::Info,
+            "hostkey",
+            "Trusted host fingerprint removed.",
+        );
         self.snapshot().await
     }
 
@@ -784,7 +804,11 @@ impl TunnelManager {
 
         let payload = serialize_pretty(&bundle).map_err(to_string)?;
         fs::write(path, payload).await.map_err(to_string)?;
-        self.push_log(LogLevel::Info, "io", &format!("规则已导出到 {}。", path));
+        self.push_log(
+            LogLevel::Info,
+            "io",
+            &format!("Rules exported to {}.", path),
+        );
 
         Ok(ExportResult {
             path: path.to_owned(),
@@ -852,7 +876,7 @@ impl TunnelManager {
         fs::write(trusted_path, trusted_payload)
             .await
             .map_err(to_string)?;
-        self.push_log(LogLevel::Info, "io", "规则导入完成。");
+        self.push_log(LogLevel::Info, "io", "Rules imported.");
 
         self.snapshot().await
     }
@@ -867,9 +891,7 @@ impl TunnelManager {
             state.current_version.clone()
         };
 
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(to_string)?;
+        let client = reqwest::Client::builder().build().map_err(to_string)?;
         let response = client
             .get(RELEASES_API_URL)
             .header(USER_AGENT, format!("NexPort/{}", current_version))
@@ -898,8 +920,8 @@ impl TunnelManager {
             {
                 state.update_state.dismissed_version = None;
             }
-            let dismissed =
-                has_update && state.update_state.dismissed_version.as_deref() == Some(latest_version.as_str());
+            let dismissed = has_update
+                && state.update_state.dismissed_version.as_deref() == Some(latest_version.as_str());
             (
                 state.update_state_path.clone(),
                 serialize_pretty(&state.update_state).map_err(to_string)?,
@@ -915,7 +937,10 @@ impl TunnelManager {
             self.push_log(
                 LogLevel::Info,
                 "update",
-                &format!("发现新版本 {}，当前版本 {}。", latest_version, current_version),
+                &format!(
+                    "Update available: latest {}, current {}.",
+                    latest_version, current_version
+                ),
             );
         }
 
@@ -949,7 +974,7 @@ impl TunnelManager {
         self.push_log(
             LogLevel::Info,
             "update",
-            &format!("已忽略版本 {} 的更新提醒。", normalized),
+            &format!("Dismissed update reminder for version {}.", normalized),
         );
         Ok(result)
     }
@@ -968,10 +993,13 @@ impl TunnelManager {
             .await
             .is_ok();
         let port_message = if port_available {
-            format!("{}:{} 可用于监听。", config.bind_address, config.local_port)
+            format!(
+                "{}:{} is available for listening.",
+                config.bind_address, config.local_port
+            )
         } else {
             format!(
-                "{}:{} 已被占用或无权限监听。",
+                "{}:{} is already in use or cannot be bound.",
                 config.bind_address, config.local_port
             )
         };
@@ -999,9 +1027,10 @@ impl TunnelManager {
                     auth_ok: true,
                     target_reachable,
                     message: if target_reachable {
-                        "SSH 可连接，认证成功，目标端口可达。".into()
+                        "SSH reachable, authentication succeeded, and target is reachable.".into()
                     } else {
-                        "SSH 可连接，认证成功，但目标端口不可达。".into()
+                        "SSH reachable and authentication succeeded, but target is unreachable."
+                            .into()
                     },
                     fingerprint: observed.as_ref().map(|item| item.fingerprint.clone()),
                     expected_fingerprint: observed.as_ref().map(|item| item.fingerprint.clone()),
@@ -1096,7 +1125,7 @@ fn validate_unique_bind(
 
     if let Some(item) = conflict {
         return Err(anyhow!(
-            "本地监听 {}:{} 已被规则“{}”使用。",
+            "Local listener {}:{} is already used by rule '{}'.",
             next.bind_address,
             next.local_port,
             item.name
@@ -1157,102 +1186,193 @@ async fn run_tunnel(
     let result = async {
         let listener = TcpListener::bind(config.address())
             .await
-            .context("监听本地端口失败")?;
-
-        // One SSH transport can open many direct-tcpip channels concurrently.
-        // We keep one authenticated session per tunnel and spawn one task per accepted
-        // local socket so a slow client never blocks later accepts on the same rule.
-        let ssh = Arc::new(SshSession::connect(&config, trusted_hosts).await?.session);
-        let mut connections = JoinSet::new();
-
-        {
-            let mut map = lock(&statuses);
-            map.insert(
-                config.id.clone(),
-                RuntimeStatus {
-                    status: TunnelStatus::Running,
-                    status_message: format!(
-                        "{} -> {}:{}",
-                        config.address(),
-                        config.target_host,
-                        config.target_port
-                    ),
-                    active_connections: 0,
-                    started_at: Some(Utc::now()),
-                    last_error: None,
-                },
-            );
-        }
+            .context("Failed to bind local listener")?;
+        let mut reconnect_attempt = 0u32;
 
         push_shared_log(
             &logs,
             LogLevel::Info,
             "tunnel",
-            &format!("规则“{}”已建立监听。", config.name),
+            &format!("Rule '{}' listener is ready.", config.name),
         );
 
         loop {
-            tokio::select! {
-              changed = shutdown_rx.changed() => {
-                if changed.is_ok() && *shutdown_rx.borrow() {
-                  break;
-                }
-              }
-              accept_result = listener.accept() => {
-                let (socket, remote_addr) = accept_result?;
-                bump_connections(&statuses, &config.id, 1);
-
-                let ssh = Arc::clone(&ssh);
-                let statuses = Arc::clone(&statuses);
-                let logs = Arc::clone(&logs);
-                let tunnel_id = config.id.clone();
-                let tunnel_name = config.name.clone();
-                let target_host = config.target_host.clone();
-                let target_port = config.target_port;
-
-                connections.spawn(async move {
-                  let outcome = ssh.call(socket, remote_addr, &target_host, target_port).await;
-                  if let Err(error) = outcome {
-                    let mut map = lock(&statuses);
-                    let entry = map.entry(tunnel_id.clone()).or_default();
-                    entry.last_error = Some(error.to_string());
-                    entry.status_message = "最近一次连接失败".into();
-                    drop(map);
-
-                    push_shared_log(
-                      &logs,
-                      LogLevel::Warn,
-                      "proxy",
-                      &format!("规则“{}”转发失败：{}", tunnel_name, error),
-                    );
-                  }
-                  bump_connections(&statuses, &tunnel_id, -1);
-                });
-              }
-              joined = connections.join_next(), if !connections.is_empty() => {
-                if let Some(Err(join_error)) = joined {
-                  push_shared_log(
-                    &logs,
-                    LogLevel::Warn,
-                    "proxy",
-                    &format!("规则“{}”的连接任务异常退出：{}", config.name, join_error),
-                  );
-                }
-              }
+            if *shutdown_rx.borrow() {
+                break;
             }
-        }
 
-        let _ = ssh.close().await;
-        while let Some(joined) = connections.join_next().await {
-            if let Err(join_error) = joined {
-                push_shared_log(
-                    &logs,
-                    LogLevel::Warn,
-                    "proxy",
-                    &format!("规则“{}”的连接任务异常退出：{}", config.name, join_error),
+            update_reconnect_status(&statuses, &config, reconnect_attempt, None);
+
+            let ssh = match SshSession::connect(&config, trusted_hosts.clone()).await {
+                Ok(outcome) => {
+                    reconnect_attempt = 0;
+                    Arc::new(outcome.session)
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    let delay = reconnect_delay(reconnect_attempt);
+                    update_reconnect_status(
+                        &statuses,
+                        &config,
+                        reconnect_attempt,
+                        Some(message.clone()),
+                    );
+                    push_shared_log(
+                        &logs,
+                        LogLevel::Warn,
+                        "tunnel",
+                        &format!(
+                            "Rule '{}' failed to connect to SSH; retrying in {}: {}",
+                            config.name,
+                            format_duration(delay),
+                            message
+                        ),
+                    );
+                    reconnect_attempt = reconnect_attempt.saturating_add(1);
+                    if wait_for_shutdown_or_timeout(&mut shutdown_rx, delay).await {
+                        break;
+                    }
+                    continue;
+                }
+            };
+
+            {
+                let mut map = lock(&statuses);
+                map.insert(
+                    config.id.clone(),
+                    RuntimeStatus {
+                        status: TunnelStatus::Running,
+                        status_message: format!(
+                            "{} -> {}:{}",
+                            config.address(),
+                            config.target_host,
+                            config.target_port
+                        ),
+                        active_connections: 0,
+                        started_at: Some(Utc::now()),
+                        last_error: None,
+                    },
                 );
             }
+
+            push_shared_log(
+                &logs,
+                LogLevel::Info,
+                "tunnel",
+                &format!("Rule '{}' connected and is serving traffic.", config.name),
+            );
+
+            let mut connections = JoinSet::new();
+            let mut healthcheck = tokio::time::interval(SSH_HEALTHCHECK_INTERVAL);
+            healthcheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut reconnect_reason = None::<String>;
+
+            loop {
+                tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_ok() && *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = healthcheck.tick() => {
+                        if ssh.is_closed() {
+                            reconnect_reason = Some("SSH session closed".to_owned());
+                            break;
+                        }
+                    }
+                    accept_result = listener.accept() => {
+                        let (socket, remote_addr) = accept_result?;
+                        bump_connections(&statuses, &config.id, 1);
+
+                        let ssh = Arc::clone(&ssh);
+                        let statuses = Arc::clone(&statuses);
+                        let logs = Arc::clone(&logs);
+                        let tunnel_id = config.id.clone();
+                        let tunnel_name = config.name.clone();
+                        let target_host = config.target_host.clone();
+                        let target_port = config.target_port;
+
+                        connections.spawn(async move {
+                            let outcome = ssh.call(socket, remote_addr, &target_host, target_port).await;
+                            if let Err(error) = outcome {
+                                let mut map = lock(&statuses);
+                                let entry = map.entry(tunnel_id.clone()).or_default();
+                                entry.last_error = Some(error.to_string());
+                                entry.status_message = "Latest connection failed".into();
+                                drop(map);
+
+                                push_shared_log(
+                                    &logs,
+                                    LogLevel::Warn,
+                                    "proxy",
+                                    &format!("Rule '{}' forwarding failed: {}", tunnel_name, error),
+                                );
+                            }
+                            bump_connections(&statuses, &tunnel_id, -1);
+                        });
+                    }
+                    joined = connections.join_next(), if !connections.is_empty() => {
+                        if let Some(Err(join_error)) = joined {
+                            push_shared_log(
+                                &logs,
+                                LogLevel::Warn,
+                                "proxy",
+                                &format!(
+                                    "Rule '{}' connection task exited unexpectedly: {}",
+                                    config.name,
+                                    join_error
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+
+            let _ = ssh.close().await;
+            while let Some(joined) = connections.join_next().await {
+                if let Err(join_error) = joined {
+                    push_shared_log(
+                        &logs,
+                        LogLevel::Warn,
+                        "proxy",
+                        &format!(
+                            "Rule '{}' connection task exited unexpectedly: {}",
+                            config.name,
+                            join_error
+                        ),
+                    );
+                }
+            }
+
+            if *shutdown_rx.borrow() {
+                break;
+            }
+
+            let reason = reconnect_reason.unwrap_or_else(|| "SSH session needs to be rebuilt".to_owned());
+            let delay = reconnect_delay(reconnect_attempt);
+            update_reconnect_status(
+                &statuses,
+                &config,
+                reconnect_attempt,
+                Some(reason.clone()),
+            );
+            push_shared_log(
+                &logs,
+                LogLevel::Warn,
+                "tunnel",
+                &format!(
+                    "Rule '{}' disconnected; retrying in {}: {}",
+                    config.name,
+                    format_duration(delay),
+                    reason
+                ),
+            );
+            reconnect_attempt = reconnect_attempt.saturating_add(1);
+            if wait_for_shutdown_or_timeout(&mut shutdown_rx, delay).await {
+                break;
+            }
         }
+
         Result::<()>::Ok(())
     }
     .await;
@@ -1263,7 +1383,7 @@ async fn run_tunnel(
             config.id.clone(),
             RuntimeStatus {
                 status: TunnelStatus::Error,
-                status_message: "隧道已中断".into(),
+                status_message: "Tunnel stopped unexpectedly".into(),
                 active_connections: 0,
                 started_at: None,
                 last_error: Some(error.to_string()),
@@ -1275,7 +1395,7 @@ async fn run_tunnel(
             &logs,
             LogLevel::Error,
             "tunnel",
-            &format!("规则“{}”异常中断：{}", config.name, error),
+            &format!("Rule '{}' stopped unexpectedly: {}", config.name, error),
         );
     }
 }
@@ -1292,6 +1412,59 @@ fn bump_connections(statuses: &Arc<Mutex<HashMap<String, RuntimeStatus>>>, id: &
     }
 }
 
+fn update_reconnect_status(
+    statuses: &Arc<Mutex<HashMap<String, RuntimeStatus>>>,
+    config: &TunnelConfig,
+    reconnect_attempt: u32,
+    last_error: Option<String>,
+) {
+    let status_message = if reconnect_attempt == 0 {
+        format!("Connecting to SSH {}", config.ssh_host)
+    } else {
+        format!(
+            "SSH disconnected, reconnect attempt {} to {}",
+            reconnect_attempt + 1,
+            config.ssh_host
+        )
+    };
+
+    lock(statuses).insert(
+        config.id.clone(),
+        RuntimeStatus {
+            status: TunnelStatus::Starting,
+            status_message,
+            active_connections: 0,
+            started_at: None,
+            last_error,
+        },
+    );
+}
+
+fn reconnect_delay(attempt: u32) -> Duration {
+    let shift = attempt.min(4);
+    let factor = 1u64 << shift;
+    let secs = (RECONNECT_DELAY_MIN.as_secs() * factor).min(RECONNECT_DELAY_MAX.as_secs());
+    Duration::from_secs(secs)
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.as_secs() <= 1 {
+        "1s".to_owned()
+    } else {
+        format!("{}s", duration.as_secs())
+    }
+}
+
+async fn wait_for_shutdown_or_timeout(
+    shutdown_rx: &mut watch::Receiver<bool>,
+    delay: Duration,
+) -> bool {
+    tokio::select! {
+        changed = shutdown_rx.changed() => changed.is_ok() && *shutdown_rx.borrow(),
+        _ = tokio::time::sleep(delay) => false,
+    }
+}
+
 struct SshSession {
     handle: client::Handle<ClientHandler>,
 }
@@ -1303,7 +1476,9 @@ impl SshSession {
     ) -> Result<ConnectOutcome> {
         let observed = Arc::new(Mutex::new(None::<ObservedHostKey>));
         let client_config = Arc::new(client::Config {
-            inactivity_timeout: Some(Duration::from_secs(30)),
+            inactivity_timeout: Some(SSH_INACTIVITY_TIMEOUT),
+            keepalive_interval: Some(SSH_KEEPALIVE_INTERVAL),
+            keepalive_max: SSH_KEEPALIVE_MAX,
             nodelay: true,
             ..Default::default()
         });
@@ -1320,7 +1495,7 @@ impl SshSession {
             handler,
         )
         .await
-        .context("连接 SSH 服务器失败")?;
+        .context("Failed to connect to SSH server")?;
 
         match config.auth_method {
             AuthMethod::Password => {
@@ -1330,16 +1505,18 @@ impl SshSession {
                         config.password.as_deref().unwrap_or_default(),
                     )
                     .await
-                    .context("SSH 密码认证失败")?;
+                    .context("SSH password authentication failed")?;
 
                 if !auth.success() {
-                    return Err(anyhow!("SSH 密码认证被服务器拒绝"));
+                    return Err(anyhow!(
+                        "SSH password authentication was rejected by the server"
+                    ));
                 }
             }
             AuthMethod::PrivateKey => {
                 let path = expand_home(config.private_key_path.as_deref().unwrap_or_default());
                 let key = keys::load_secret_key(&path, config.private_key_passphrase.as_deref())
-                    .with_context(|| format!("读取私钥失败: {}", path.display()))?;
+                    .with_context(|| format!("Failed to read private key: {}", path.display()))?;
 
                 let auth = session
                     .authenticate_publickey(
@@ -1350,10 +1527,12 @@ impl SshSession {
                         ),
                     )
                     .await
-                    .context("SSH 私钥认证失败")?;
+                    .context("SSH private key authentication failed")?;
 
                 if !auth.success() {
-                    return Err(anyhow!("SSH 私钥认证被服务器拒绝"));
+                    return Err(anyhow!(
+                        "SSH private key authentication was rejected by the server"
+                    ));
                 }
             }
         }
@@ -1381,7 +1560,7 @@ impl SshSession {
                 originator_addr.port().into(),
             )
             .await
-            .context("打开 SSH direct-tcpip 通道失败")?;
+            .context("Failed to open SSH direct-tcpip channel")?;
 
         let mut stream_closed = false;
         let mut buf = vec![0u8; 65536];
@@ -1429,10 +1608,14 @@ impl SshSession {
                 0,
             )
             .await
-            .context("目标端口不可达")?;
+            .context("Target port is unreachable")?;
         let _ = channel.eof().await;
         let _ = channel.close().await;
         Ok(())
+    }
+
+    fn is_closed(&self) -> bool {
+        self.handle.is_closed()
     }
 
     async fn close(&self) -> Result<()> {
@@ -1513,13 +1696,13 @@ fn parse_hostkey_error(raw: &str) -> Option<HostKeyError> {
     let message = match status {
         HostKeyStatus::Unknown => {
             format!(
-                "首次见到该 SSH 主机指纹，请先确认并信任。当前指纹：{}",
+                "First time seeing this SSH host fingerprint. Please review and trust it first: {}",
                 actual_fingerprint
             )
         }
         HostKeyStatus::Mismatch => {
             format!(
-                "该 SSH 主机指纹与已信任记录不一致。当前：{}，已信任：{}",
+                "SSH host fingerprint does not match the trusted record. Current: {}, trusted: {}",
                 actual_fingerprint,
                 expected_fingerprint.clone().unwrap_or_default()
             )
